@@ -1,12 +1,15 @@
 import logging
 import time
+import uuid
 from pathlib import Path
 
 from google import genai
+from google.cloud import storage
 from google.genai import types
 from google.oauth2 import service_account
 
 from .config import (
+    GCS_BUCKET_NAME,
     GEMINI_API_KEY,
     GEMINI_PROJECT_ID,
     GEMINI_PROJECT_LOCATION,
@@ -18,14 +21,15 @@ from .config import (
 logger = logging.getLogger(__name__)
 
 
-def create_client() -> tuple[genai.Client, bool]:
+def create_client() -> tuple[genai.Client, bool, service_account.Credentials | None]:
     """認証方法を自動判定してGeminiクライアントを生成する。
 
     Returns:
-        (client, is_vertex_ai) のタプル。
+        (client, is_vertex_ai, credentials) のタプル。
+        credentialsはVertex AI時のみ返る（GCSクライアント流用のため）。
     """
     if GEMINI_API_KEY:
-        return genai.Client(api_key=GEMINI_API_KEY), False
+        return genai.Client(api_key=GEMINI_API_KEY), False, None
 
     if GOOGLE_APPLICATION_CREDENTIALS and GEMINI_PROJECT_ID:
         credentials_obj = service_account.Credentials.from_service_account_file(
@@ -40,6 +44,7 @@ def create_client() -> tuple[genai.Client, bool]:
                 credentials=credentials_obj,
             ),
             True,
+            credentials_obj,
         )
 
     raise RuntimeError(
@@ -92,6 +97,26 @@ def _upload_video(client: genai.Client, video_path: Path, mime_type: str) -> typ
     return uploaded_file
 
 
+def _upload_to_gcs(
+    credentials: service_account.Credentials,
+    video_path: Path,
+    mime_type: str,
+) -> tuple[str, storage.Blob]:
+    """動画をGCSバケットにアップロードし、(gs:// URI, blob) を返す。"""
+    if not GCS_BUCKET_NAME:
+        raise RuntimeError(
+            "Vertex AIモードで大容量動画を扱うには GCS_BUCKET_NAME の設定が必要です"
+        )
+
+    storage_client = storage.Client(project=GEMINI_PROJECT_ID, credentials=credentials)
+    bucket = storage_client.bucket(GCS_BUCKET_NAME)
+    blob_name = f"gemini-video-analyze-mcp/{uuid.uuid4()}_{video_path.name}"
+    blob = bucket.blob(blob_name)
+    blob.upload_from_filename(str(video_path), content_type=mime_type)
+    gcs_uri = f"gs://{GCS_BUCKET_NAME}/{blob_name}"
+    return gcs_uri, blob
+
+
 def analyze_video(
     client: genai.Client,
     video_path: str,
@@ -99,37 +124,45 @@ def analyze_video(
     model: str,
     *,
     is_vertex_ai: bool = False,
+    credentials: service_account.Credentials | None = None,
 ) -> str:
-    """動画を解析してテキスト結果を返す。"""
+    """動画を解析してテキスト結果を返す。
+
+    解析後のリモート側動画（Gemini Developer APIのFile API上、
+    またはVertex AIモード時のGCS上）は意図的に削除しません。
+    再利用の余地を残すためです。詳細な寿命・課金・推奨クリーンアップ方法は
+    README を参照してください。
+    """
     path = Path(video_path)
     if not path.exists():
         raise FileNotFoundError(f"動画ファイルが見つかりません: {video_path}")
 
     mime_type = _get_mime_type(path)
     file_size = path.stat().st_size
+    is_large = file_size > INLINE_SIZE_LIMIT
 
-    use_file_api = file_size > INLINE_SIZE_LIMIT and not is_vertex_ai
-
-    if is_vertex_ai and file_size > INLINE_SIZE_LIMIT:
-        raise ValueError(
-            f"Vertex AI環境では{INLINE_SIZE_LIMIT // (1024 * 1024)}MB以上の動画はサポートされていません。"
-            "Gemini Developer API (GEMINI_API_KEY) を使用するか、動画を小さくしてください。"
-        )
-
-    if use_file_api:
-        uploaded = _upload_video(client, path, mime_type)
-        try:
-            response = client.models.generate_content(
-                model=model,
-                contents=[prompt, uploaded],
-            )
-        finally:
-            _delete_file_quietly(client, uploaded.name)
-    else:
+    if not is_large:
         video_part = types.Part.from_bytes(data=path.read_bytes(), mime_type=mime_type)
         response = client.models.generate_content(
             model=model,
             contents=[prompt, video_part],
+        )
+    elif is_vertex_ai:
+        if credentials is None:
+            raise RuntimeError(
+                "Vertex AIモードで大容量動画を扱うには credentials が必要です"
+            )
+        gcs_uri, _blob = _upload_to_gcs(credentials, path, mime_type)
+        video_part = types.Part.from_uri(file_uri=gcs_uri, mime_type=mime_type)
+        response = client.models.generate_content(
+            model=model,
+            contents=[prompt, video_part],
+        )
+    else:
+        uploaded = _upload_video(client, path, mime_type)
+        response = client.models.generate_content(
+            model=model,
+            contents=[prompt, uploaded],
         )
 
     if not response.text:

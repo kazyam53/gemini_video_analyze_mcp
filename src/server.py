@@ -2,6 +2,7 @@ import logging
 from typing import Annotated
 
 from google import genai
+from google.oauth2 import service_account
 from mcp.server.fastmcp import FastMCP
 
 from .config import DEFAULT_MODEL, RECOMMENDED_MODELS
@@ -14,13 +15,14 @@ mcp = FastMCP(name="gemini-video-analyze")
 
 _client: genai.Client | None = None
 _is_vertex_ai: bool = False
+_credentials: service_account.Credentials | None = None
 
 
-def _get_client() -> tuple[genai.Client, bool]:
-    global _client, _is_vertex_ai
+def _get_client() -> tuple[genai.Client, bool, service_account.Credentials | None]:
+    global _client, _is_vertex_ai, _credentials
     if _client is None:
-        _client, _is_vertex_ai = create_client()
-    return _client, _is_vertex_ai
+        _client, _is_vertex_ai, _credentials = create_client()
+    return _client, _is_vertex_ai, _credentials
 
 
 @mcp.tool()
@@ -39,13 +41,14 @@ def analyze_video(
     対応フォーマット: mp4, mov, avi, webm, flv, wmv, m4v, 3gp
     """
     try:
-        client, is_vertex = _get_client()
+        client, is_vertex, credentials = _get_client()
         return _analyze_video(
             client=client,
             video_path=video_path,
             prompt=prompt,
             model=model,
             is_vertex_ai=is_vertex,
+            credentials=credentials,
         )
     except Exception:
         logger.exception("動画解析エラー")

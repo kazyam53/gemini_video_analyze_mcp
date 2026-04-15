@@ -5,6 +5,7 @@ description = "MCP server for video analysis using Gemini API"
 requires-python = ">=3.12"
 scripts = { "gemini-video-analyze-mcp" = "src.server:main" }
 dependencies = [
+    "google-cloud-storage>=2.18.0",
     "google-genai>=1.11.0",
     "mcp[cli]>=1.19.0",
     "python-dotenv>=1.0.0",
