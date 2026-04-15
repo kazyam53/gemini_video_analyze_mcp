@@ -1,9 +1,10 @@
+import hashlib
 import logging
 import time
-import uuid
 from pathlib import Path
 
 from google import genai
+from google.api_core import exceptions as google_exceptions
 from google.cloud import storage
 from google.genai import types
 from google.oauth2 import service_account
@@ -32,10 +33,21 @@ def create_client() -> tuple[genai.Client, bool, service_account.Credentials | N
         return genai.Client(api_key=GEMINI_API_KEY), False, None
 
     if GOOGLE_APPLICATION_CREDENTIALS and GEMINI_PROJECT_ID:
-        credentials_obj = service_account.Credentials.from_service_account_file(
-            GOOGLE_APPLICATION_CREDENTIALS,
-            scopes=["https://www.googleapis.com/auth/cloud-platform"],
-        )
+        try:
+            credentials_obj = service_account.Credentials.from_service_account_file(
+                GOOGLE_APPLICATION_CREDENTIALS,
+                scopes=["https://www.googleapis.com/auth/cloud-platform"],
+            )
+        except FileNotFoundError as e:
+            raise RuntimeError(
+                f"サービスアカウントJSONが見つかりません: {GOOGLE_APPLICATION_CREDENTIALS}。"
+                " GOOGLE_APPLICATION_CREDENTIALS のパスを確認してください。"
+            ) from e
+        except ValueError as e:
+            raise RuntimeError(
+                f"サービスアカウントJSONの読み込みに失敗しました: {GOOGLE_APPLICATION_CREDENTIALS}。"
+                f" ファイル内容が不正な可能性があります: {e}"
+            ) from e
         return (
             genai.Client(
                 vertexai=True,
@@ -47,8 +59,22 @@ def create_client() -> tuple[genai.Client, bool, service_account.Credentials | N
             credentials_obj,
         )
 
+    # Vertex AIモードの部分設定を検出して具体的な案内を出す
+    if GOOGLE_APPLICATION_CREDENTIALS and not GEMINI_PROJECT_ID:
+        raise RuntimeError(
+            "Vertex AIモードには GOOGLE_APPLICATION_CREDENTIALS と GEMINI_PROJECT_ID の両方が必要です。"
+            " 現在 GEMINI_PROJECT_ID が未設定です。"
+        )
+    if GEMINI_PROJECT_ID and not GOOGLE_APPLICATION_CREDENTIALS:
+        raise RuntimeError(
+            "Vertex AIモードには GOOGLE_APPLICATION_CREDENTIALS と GEMINI_PROJECT_ID の両方が必要です。"
+            " 現在 GOOGLE_APPLICATION_CREDENTIALS が未設定です。"
+        )
+
     raise RuntimeError(
-        "GEMINI_API_KEY または GOOGLE_APPLICATION_CREDENTIALS + GEMINI_PROJECT_ID を設定してください"
+        "認証情報が設定されていません。"
+        " Gemini Developer API を使う場合は GEMINI_API_KEY を、"
+        " Vertex AI を使う場合は GOOGLE_APPLICATION_CREDENTIALS と GEMINI_PROJECT_ID を設定してください。"
     )
 
 
@@ -97,24 +123,74 @@ def _upload_video(client: genai.Client, video_path: Path, mime_type: str) -> typ
     return uploaded_file
 
 
+def _compute_file_hash(video_path: Path) -> str:
+    """動画ファイルのSHA256ハッシュ先頭16文字をストリーミング計算する。"""
+    hasher = hashlib.sha256()
+    with video_path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()[:16]
+
+
 def _upload_to_gcs(
     credentials: service_account.Credentials,
     video_path: Path,
     mime_type: str,
-) -> tuple[str, storage.Blob]:
-    """動画をGCSバケットにアップロードし、(gs:// URI, blob) を返す。"""
+) -> tuple[str, storage.Blob, bool]:
+    """動画をGCSバケットにアップロードし、(gs:// URI, blob, is_newly_uploaded) を返す。
+
+    Blob名は内容ハッシュベースで決定論的に決まるため、同一内容の動画を
+    再解析する際はアップロードをスキップして既存Blobを再利用する。
+
+    Returns:
+        gcs_uri: `gs://bucket/path` 形式のURI
+        blob: Blobオブジェクト（失敗時クリーンアップで使用する場合あり）
+        is_newly_uploaded: 今回新規にアップロードした場合はTrue、既存Blobを再利用した場合はFalse
+    """
     if not GCS_BUCKET_NAME:
         raise RuntimeError(
-            "Vertex AIモードで大容量動画を扱うには GCS_BUCKET_NAME の設定が必要です"
+            "Vertex AIモードで約19MiB超の動画を扱うには GCS_BUCKET_NAME の設定が必要です。"
+            " `.claude.json` の env に GCS_BUCKET_NAME=<bucket-name> を追加してください。"
         )
 
-    storage_client = storage.Client(project=GEMINI_PROJECT_ID, credentials=credentials)
-    bucket = storage_client.bucket(GCS_BUCKET_NAME)
-    blob_name = f"gemini-video-analyze-mcp/{uuid.uuid4()}_{video_path.name}"
-    blob = bucket.blob(blob_name)
-    blob.upload_from_filename(str(video_path), content_type=mime_type)
-    gcs_uri = f"gs://{GCS_BUCKET_NAME}/{blob_name}"
-    return gcs_uri, blob
+    try:
+        storage_client = storage.Client(
+            project=GEMINI_PROJECT_ID, credentials=credentials
+        )
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+
+        digest = _compute_file_hash(video_path)
+        blob_name = f"gemini-video-analyze-mcp/{digest}_{video_path.name}"
+        blob = bucket.blob(blob_name)
+        gcs_uri = f"gs://{GCS_BUCKET_NAME}/{blob_name}"
+
+        if blob.exists():
+            logger.info("GCS上に既存の動画を再利用: %s", gcs_uri)
+            return gcs_uri, blob, False
+
+        logger.info("GCSへアップロード開始: %s", gcs_uri)
+        blob.upload_from_filename(str(video_path), content_type=mime_type)
+        logger.info("GCSへアップロード完了: %s", gcs_uri)
+        return gcs_uri, blob, True
+    except google_exceptions.Forbidden as e:
+        raise RuntimeError(
+            f"GCSバケット `{GCS_BUCKET_NAME}` へのアクセスが拒否されました。"
+            " サービスアカウントに `roles/storage.objectAdmin`（または"
+            " `objectCreator`/`objectViewer`/`objectUser`）が付与されているか確認してください。"
+        ) from e
+    except google_exceptions.NotFound as e:
+        raise RuntimeError(
+            f"GCSバケット `{GCS_BUCKET_NAME}` が見つかりません。"
+            " バケットが存在し、GEMINI_PROJECT_ID と同じプロジェクトにあることを確認してください。"
+        ) from e
+
+
+def _delete_blob_quietly(blob: storage.Blob) -> None:
+    """GCS上のBlobを削除する。失敗してもログのみ。"""
+    try:
+        blob.delete()
+    except Exception:
+        logger.warning("GCS上の動画削除に失敗: %s", blob.name)
 
 
 def analyze_video(
@@ -150,14 +226,20 @@ def analyze_video(
     elif is_vertex_ai:
         if credentials is None:
             raise RuntimeError(
-                "Vertex AIモードで大容量動画を扱うには credentials が必要です"
+                "Vertex AIモードで約19MiB超の動画を扱うには Google Cloud の認証設定が必要です。"
+                " GOOGLE_APPLICATION_CREDENTIALS と GEMINI_PROJECT_ID を確認してください。"
             )
-        gcs_uri, _blob = _upload_to_gcs(credentials, path, mime_type)
-        video_part = types.Part.from_uri(file_uri=gcs_uri, mime_type=mime_type)
-        response = client.models.generate_content(
-            model=model,
-            contents=[prompt, video_part],
-        )
+        gcs_uri, blob, is_newly_uploaded = _upload_to_gcs(credentials, path, mime_type)
+        try:
+            video_part = types.Part.from_uri(file_uri=gcs_uri, mime_type=mime_type)
+            response = client.models.generate_content(
+                model=model,
+                contents=[prompt, video_part],
+            )
+        except Exception:
+            if is_newly_uploaded:
+                _delete_blob_quietly(blob)
+            raise
     else:
         uploaded = _upload_video(client, path, mime_type)
         response = client.models.generate_content(
