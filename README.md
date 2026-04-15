@@ -205,6 +205,24 @@ gcloud storage buckets update gs://your-video-bucket --lifecycle-file=lifecycle.
 
 任意のGeminiモデル名を指定できます。
 
+### `delete_uploaded_video`
+
+動画解析後のクリーンアップ用途で、GCSにアップロード済みの動画を削除します。**Vertex AIモード専用**で、ユーザから明示的に依頼があった場合のみ呼び出すことを想定しています。
+
+**パラメータ:**
+
+| 名前 | 型 | 必須 | 説明 |
+|------|------|------|------|
+| `video_path` | string | Yes | 削除対象のローカル動画ファイルの絶対パス |
+
+**動作:**
+
+指定されたローカルファイルのSHA256ハッシュを計算し、`gemini-video-analyze-mcp/{hash}_{filename}` 形式のBlob名を再構築して、一致するBlobが存在する場合のみ削除します。ハッシュによる同一性検証があるため、内容の異なるファイルを誤って指定しても別Blobを削除してしまう事故は起きません。
+
+- 約19MiB以下の動画はそもそもアップロードされないため、削除対象なしと返します
+- Gemini Developer APIモードでは利用できません（File API側のファイル名がハッシュベースではないため）
+- サービスアカウントには削除権限（`roles/storage.objectAdmin` または `objectUser`）が必要です
+
 ## 開発
 
 ```bash

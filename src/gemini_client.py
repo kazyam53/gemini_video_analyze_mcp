@@ -193,6 +193,65 @@ def _delete_blob_quietly(blob: storage.Blob) -> None:
         logger.warning("GCS上の動画削除に失敗: %s", blob.name)
 
 
+def delete_uploaded_video_from_gcs(
+    credentials: service_account.Credentials,
+    video_path: str,
+) -> str:
+    """指定ローカル動画のハッシュからGCS上のBlobを特定して削除する。
+
+    意図しない削除を防ぐため、削除対象は _upload_to_gcs と同じ決定論的Blob名
+    （`gemini-video-analyze-mcp/{sha256先頭16桁}_{ファイル名}`）に限定する。
+    ローカルファイルの内容が過去にアップロードしたものと一致する場合のみBlobが
+    ヒットし、削除される。
+    """
+    path = Path(video_path)
+    if not path.exists():
+        raise FileNotFoundError(f"動画ファイルが見つかりません: {video_path}")
+
+    file_size = path.stat().st_size
+    if file_size <= INLINE_SIZE_LIMIT:
+        return (
+            f"インラインサイズ（{file_size}バイト ≤ {INLINE_SIZE_LIMIT}バイト）のため"
+            " GCSへはアップロードされていません。削除対象はありません。"
+        )
+
+    if not GCS_BUCKET_NAME:
+        raise RuntimeError(
+            "GCS_BUCKET_NAME が未設定です。削除対象バケットを特定できません。"
+        )
+
+    _get_mime_type(path)
+
+    try:
+        storage_client = storage.Client(
+            project=GEMINI_PROJECT_ID, credentials=credentials
+        )
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+
+        digest = _compute_file_hash(path)
+        blob_name = f"gemini-video-analyze-mcp/{digest}_{path.name}"
+        blob = bucket.blob(blob_name)
+        gcs_uri = f"gs://{GCS_BUCKET_NAME}/{blob_name}"
+
+        if not blob.exists():
+            return (
+                f"同一ハッシュのBlobが見つかりませんでした: {gcs_uri}。"
+                " 既に削除済み、または別の内容/名前でアップロードされた可能性があります。"
+            )
+
+        blob.delete()
+        logger.info("GCS上の動画を削除: %s", gcs_uri)
+        return f"GCS上の動画を削除しました: {gcs_uri}"
+    except google_exceptions.Forbidden as e:
+        raise RuntimeError(
+            f"GCSバケット `{GCS_BUCKET_NAME}` への削除権限がありません。"
+            " サービスアカウントに `roles/storage.objectAdmin` または"
+            " `objectUser` が付与されているか確認してください。"
+        ) from e
+    except google_exceptions.NotFound as e:
+        raise RuntimeError(f"GCSバケット `{GCS_BUCKET_NAME}` が見つかりません。") from e
+
+
 def analyze_video(
     client: genai.Client,
     video_path: str,
