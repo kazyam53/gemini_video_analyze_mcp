@@ -217,11 +217,11 @@ gcloud storage buckets update gs://your-video-bucket --lifecycle-file=lifecycle.
 
 **動作:**
 
-指定されたローカルファイルのSHA256ハッシュを計算し、`gemini-video-analyze-mcp/{hash}_{filename}` 形式のBlob名を再構築して、一致するBlobが存在する場合のみ削除します。ハッシュによる同一性検証があるため、内容の異なるファイルを誤って指定しても別Blobを削除してしまう事故は起きません。
+指定されたローカルファイルのSHA256ハッシュの先頭16文字を計算し、`gemini-video-analyze-mcp/{sha256_16}_{filename}` 形式のBlob名を再構築して、一致する名前のBlobが存在する場合のみ削除します。ローカルファイルの内容が過去アップロード時と変わっていれば再計算したBlob名が一致しないため、内容の異なるファイルを誤って指定しても別Blobを削除してしまう事故は起きません（ただしGCS上オブジェクトの実内容そのものを検証しているわけではなく、あくまで決定論的なBlob名の一致に依存しています）。
 
 - 約19MiB以下の動画はそもそもアップロードされないため、削除対象なしと返します
 - Gemini Developer APIモードでは利用できません（File API側のファイル名がハッシュベースではないため）
-- サービスアカウントには削除権限（`roles/storage.objectAdmin` または `objectUser`）が必要です
+- サービスアカウントには削除権限（`roles/storage.objectAdmin` または `roles/storage.objectUser`）が必要です
 
 ## 開発
 

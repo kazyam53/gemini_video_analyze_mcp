@@ -69,8 +69,8 @@ def delete_uploaded_video(
 
     ユーザから明示的に依頼された場合のみ呼び出してください。
     Vertex AIモード + 約19MiB超の動画のみが対象です（それ以外はアップロードされません）。
-    指定ローカルファイルのSHA256ハッシュを計算し、`gemini-video-analyze-mcp/{hash}_{name}`
-    と同一名のBlobが存在する場合のみ削除します。
+    指定ローカルファイルのSHA256ハッシュの先頭16文字を計算し、
+    `gemini-video-analyze-mcp/{sha256_16}_{name}` と同一名のBlobが存在する場合のみ削除します。
     """
     try:
         _, is_vertex, credentials = _get_client()

@@ -197,12 +197,13 @@ def delete_uploaded_video_from_gcs(
     credentials: service_account.Credentials,
     video_path: str,
 ) -> str:
-    """指定ローカル動画のハッシュからGCS上のBlobを特定して削除する。
+    """指定ローカル動画のハッシュからGCS上のBlob名を再計算して削除する。
 
     意図しない削除を防ぐため、削除対象は _upload_to_gcs と同じ決定論的Blob名
     （`gemini-video-analyze-mcp/{sha256先頭16桁}_{ファイル名}`）に限定する。
-    ローカルファイルの内容が過去にアップロードしたものと一致する場合のみBlobが
-    ヒットし、削除される。
+    この関数はローカルファイルの内容ハッシュからBlob名を再計算し、その名前に
+    一致するBlobが存在する場合のみ削除する。GCS上オブジェクトの内容そのものが
+    ローカルファイルと一致するかどうかは検証しない。
     """
     path = Path(video_path)
     if not path.exists():
@@ -246,7 +247,7 @@ def delete_uploaded_video_from_gcs(
         raise RuntimeError(
             f"GCSバケット `{GCS_BUCKET_NAME}` への削除権限がありません。"
             " サービスアカウントに `roles/storage.objectAdmin` または"
-            " `objectUser` が付与されているか確認してください。"
+            " `roles/storage.objectUser` が付与されているか確認してください。"
         ) from e
     except google_exceptions.NotFound as e:
         raise RuntimeError(f"GCSバケット `{GCS_BUCKET_NAME}` が見つかりません。") from e
