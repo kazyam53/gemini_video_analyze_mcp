@@ -32,5 +32,14 @@ VIDEO_MIME_TYPES = {
     ".3gp": "video/3gpp",
 }
 
+IMAGE_MIME_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".bmp": "image/bmp",
+}
+
 # File APIを使うファイルサイズ閾値 (promptサイズの余裕を考慮して19MB)
 INLINE_SIZE_LIMIT = 19 * 1024 * 1024

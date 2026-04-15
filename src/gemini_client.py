@@ -15,6 +15,7 @@ from .config import (
     GEMINI_PROJECT_ID,
     GEMINI_PROJECT_LOCATION,
     GOOGLE_APPLICATION_CREDENTIALS,
+    IMAGE_MIME_TYPES,
     INLINE_SIZE_LIMIT,
     VIDEO_MIME_TYPES,
 )
@@ -306,6 +307,60 @@ def analyze_video(
             model=model,
             contents=[prompt, uploaded],
         )
+
+    if not response.text:
+        raise RuntimeError(
+            "Gemini APIからテキスト応答が得られませんでした（安全フィルタ等の可能性）"
+        )
+    return response.text
+
+
+def _get_image_mime_type(image_path: Path) -> str:
+    """拡張子から画像MIME typeを取得する。"""
+    suffix = image_path.suffix.lower()
+    mime_type = IMAGE_MIME_TYPES.get(suffix)
+    if not mime_type:
+        supported = ", ".join(IMAGE_MIME_TYPES.keys())
+        raise ValueError(f"未対応の画像フォーマット: {suffix} (対応: {supported})")
+    return mime_type
+
+
+def analyze_image(
+    client: genai.Client,
+    image_path: str,
+    prompt: str,
+    model: str,
+) -> str:
+    """画像を解析してテキスト結果を返す。
+
+    画像はインラインで送信するのみ。動画のような File API / GCS 経由のアップロードは
+    使わない（画像サイズは通常19MiB未満で、インライン送信で十分なため）。
+    典型用途: UI要素のbounding box抽出、OCR、画像内容の説明、図解の解釈など。
+
+    bbox 抽出で使う場合のプロンプト例:
+        'この画面キャプチャに写っている「Select MATLAB Version」メニュー項目の
+         bounding box を [ymin, xmin, ymax, xmax] の形で、画像サイズで正規化した
+         0〜1000 の整数値で返してください。JSONのみを返してください。'
+    Gemini 2.5/3 系は bounding box 出力向けに訓練されており、0-1000 正規化が標準です。
+    """
+    path = Path(image_path)
+    if not path.exists():
+        raise FileNotFoundError(f"画像ファイルが見つかりません: {image_path}")
+
+    mime_type = _get_image_mime_type(path)
+    file_size = path.stat().st_size
+    if file_size > INLINE_SIZE_LIMIT:
+        raise ValueError(
+            f"画像ファイルが大きすぎます ({file_size} バイト > {INLINE_SIZE_LIMIT} バイト)。"
+            " このツールは画像をインラインでのみ送信します。"
+            " 必要に応じて事前にリサイズしてください。"
+        )
+
+    image_part = types.Part.from_bytes(data=path.read_bytes(), mime_type=mime_type)
+    response = client.models.generate_content(
+        model=model,
+        contents=[prompt, image_part],
+    )
 
     if not response.text:
         raise RuntimeError(

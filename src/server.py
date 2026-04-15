@@ -6,6 +6,7 @@ from google.oauth2 import service_account
 from mcp.server.fastmcp import FastMCP
 
 from .config import DEFAULT_MODEL, RECOMMENDED_MODELS
+from .gemini_client import analyze_image as _analyze_image
 from .gemini_client import analyze_video as _analyze_video
 from .gemini_client import create_client
 from .gemini_client import delete_uploaded_video_from_gcs as _delete_uploaded_video
@@ -53,6 +54,40 @@ def analyze_video(
         )
     except Exception:
         logger.exception("動画解析エラー")
+        raise
+
+
+@mcp.tool()
+def analyze_image(
+    image_path: Annotated[
+        str, "解析する画像ファイルの絶対パス (.png/.jpg/.jpeg/.webp/.gif/.bmp)"
+    ],
+    prompt: Annotated[str, "画像に対する解析指示テキスト"],
+    model: Annotated[
+        str,
+        f"使用するGeminiモデル名。推奨: {', '.join(RECOMMENDED_MODELS)}",
+    ] = DEFAULT_MODEL,
+) -> str:
+    """Gemini APIを使用して画像ファイルを解析します。
+
+    画像ファイルとプロンプトを指定すると、Geminiモデルが画像の内容を分析し、
+    指示に基づいたテキスト回答を返します。
+    対応フォーマット: png, jpg/jpeg, webp, gif, bmp
+
+    主な用途:
+    - UI要素のbounding box抽出 (prompt で正規化0-1000のJSON形式を指示)
+    - 画像内容の説明、OCR、図解の解釈など
+    """
+    try:
+        client, _, _ = _get_client()
+        return _analyze_image(
+            client=client,
+            image_path=image_path,
+            prompt=prompt,
+            model=model,
+        )
+    except Exception:
+        logger.exception("画像解析エラー")
         raise
 
 
